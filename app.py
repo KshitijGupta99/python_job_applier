@@ -1,0 +1,242 @@
+from contextlib import asynccontextmanager
+from time import perf_counter
+from typing import List
+
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
+
+from config import get_settings, Settings
+from models import Job, JobsResponse
+from sources import greenhouse, lever
+from utils.deduplicator import Deduplicator
+from utils.logger import get_logger, setup_logging
+from utils.rate_limiter import RateLimiter
+
+
+load_dotenv()
+settings: Settings = get_settings()
+setup_logging(settings.log_level)
+logger = get_logger(__name__)
+rate_limiter = RateLimiter(settings.rate_limit_delay)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
+        app.state.http_client = client
+        yield
+
+
+app = FastAPI(title="Job Scraper Service", lifespan=lifespan)
+
+
+def get_http_client(request: Request) -> httpx.AsyncClient:
+    return request.app.state.http_client
+
+
+def get_settings_dep() -> Settings:
+    return settings
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    start = perf_counter()
+    response = await call_next(request)
+    duration_ms = (perf_counter() - start) * 1000
+    logger.info(
+        {
+            "event": "http_request",
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": round(duration_ms, 2),
+            "client_host": request.client.host if request.client else None,
+        }
+    )
+    return response
+
+
+@app.exception_handler(httpx.HTTPError)
+async def httpx_exception_handler(request: Request, exc: httpx.HTTPError):
+    logger.error(
+        {
+            "event": "external_http_error",
+            "detail": str(exc),
+            "url": str(getattr(exc, "request", None).url) if getattr(exc, "request", None) else None,
+        }
+    )
+    return JSONResponse(
+        status_code=502,
+        content={"detail": "Error communicating with external job source."},
+    )
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok"}
+
+
+@app.get("/scrape/greenhouse/{company}", response_model=JobsResponse)
+async def scrape_greenhouse(
+    company: str,
+    request: Request,
+    client: httpx.AsyncClient = Depends(get_http_client),
+    cfg: Settings = Depends(get_settings_dep),
+) -> JobsResponse:
+    start = perf_counter()
+    deduplicator = Deduplicator()
+    try:
+        jobs: List[Job] = await greenhouse.scrape_company_jobs(
+            company=company,
+            client=client,
+            settings=cfg,
+            rate_limiter=rate_limiter,
+            deduplicator=deduplicator,
+        )
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            {
+                "event": "scrape_error",
+                "source": "greenhouse",
+                "company": company,
+                "status_code": exc.response.status_code,
+            }
+        )
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Failed to scrape Greenhouse for {company}.",
+        )
+
+    duration_ms = (perf_counter() - start) * 1000
+    logger.info(
+        {
+            "event": "scrape_completed",
+            "source": "greenhouse",
+            "company": company,
+            "count": len(jobs),
+            "duration_ms": round(duration_ms, 2),
+        }
+    )
+    return JobsResponse(count=len(jobs), jobs=jobs, duration_ms=round(duration_ms, 2))
+
+
+@app.get("/scrape/lever/{company}", response_model=JobsResponse)
+async def scrape_lever(
+    company: str,
+    request: Request,
+    client: httpx.AsyncClient = Depends(get_http_client),
+    cfg: Settings = Depends(get_settings_dep),
+) -> JobsResponse:
+    start = perf_counter()
+    deduplicator = Deduplicator()
+    try:
+        jobs: List[Job] = await lever.scrape_company_jobs(
+            company=company,
+            client=client,
+            settings=cfg,
+            rate_limiter=rate_limiter,
+            deduplicator=deduplicator,
+        )
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            {
+                "event": "scrape_error",
+                "source": "lever",
+                "company": company,
+                "status_code": exc.response.status_code,
+            }
+        )
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Failed to scrape Lever for {company}.",
+        )
+
+    duration_ms = (perf_counter() - start) * 1000
+    logger.info(
+        {
+            "event": "scrape_completed",
+            "source": "lever",
+            "company": company,
+            "count": len(jobs),
+            "duration_ms": round(duration_ms, 2),
+        }
+    )
+    return JobsResponse(count=len(jobs), jobs=jobs, duration_ms=round(duration_ms, 2))
+
+
+@app.get("/scrape/all", response_model=JobsResponse)
+async def scrape_all(
+    companies: str = Query(..., description="Comma-separated list of company identifiers"),
+    request: Request = None,
+    client: httpx.AsyncClient = Depends(get_http_client),
+    cfg: Settings = Depends(get_settings_dep),
+) -> JobsResponse:
+    start = perf_counter()
+    company_list = [c.strip() for c in companies.split(",") if c.strip()]
+    if not company_list:
+        raise HTTPException(status_code=400, detail="At least one company must be provided.")
+
+    deduplicator = Deduplicator()
+    jobs: List[Job] = []
+
+    import asyncio
+
+    tasks = []
+    for company in company_list:
+        tasks.append(
+            greenhouse.scrape_company_jobs(
+                company=company,
+                client=client,
+                settings=cfg,
+                rate_limiter=rate_limiter,
+                deduplicator=deduplicator,
+            )
+        )
+        tasks.append(
+            lever.scrape_company_jobs(
+                company=company,
+                client=client,
+                settings=cfg,
+                rate_limiter=rate_limiter,
+                deduplicator=deduplicator,
+            )
+        )
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(
+                {
+                    "event": "scrape_partial_error",
+                    "detail": str(result),
+                }
+            )
+            continue
+        jobs.extend(result)
+
+    duration_ms = (perf_counter() - start) * 1000
+    logger.info(
+        {
+            "event": "scrape_completed",
+            "source": "all",
+            "companies": company_list,
+            "count": len(jobs),
+            "duration_ms": round(duration_ms, 2),
+        }
+    )
+    return JobsResponse(count=len(jobs), jobs=jobs, duration_ms=round(duration_ms, 2))
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=settings.port,
+        reload=False,
+    )
+
