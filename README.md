@@ -109,7 +109,17 @@ curl -s "http://localhost:8000/scrape/lever/lever"
 curl -s "http://localhost:8000/scrape/lever/leverdemo"
 ```
 
-Example response: `{"count": N, "jobs": [...], "duration_ms": 123.45}`
+Example response: `{"count": N, "jobs": [...], "duration_ms": 123.45, "filters_applied": {}}`
+
+#### Lever with filters
+
+```bash
+# Data analyst roles in France with SQL mentioned
+curl -s "http://localhost:8000/scrape/lever/leverdemo?keyword=data%20analyst&location=france&skills=sql"
+
+# Remote-only roles with Python and at least 2 matching skills
+curl -s "http://localhost:8000/scrape/lever/leverdemo?remote_only=true&skills=python,sql&min_match_score=2"
+```
 
 ### Scrape all (multiple companies, both sources)
 
@@ -120,7 +130,39 @@ curl -s "http://localhost:8000/scrape/all?companies=lever,leverdemo"
 curl -s "http://localhost:8000/scrape/all?companies=vaulttec,embed,lever"
 ```
 
-Example response: `{"count": N, "jobs": [...], "duration_ms": 456.78}`
+Example response: `{"count": N, "jobs": [...], "duration_ms": 456.78, "filters_applied": {}}`
+
+#### All sources with filters
+
+```bash
+# Software engineer roles across multiple companies, USA-only
+curl -s "http://localhost:8000/scrape/all?companies=myghboard,leverdemo&keyword=software%20engineer&location=usa"
+
+# High-paying remote data roles requiring Python or SQL
+curl -s "http://localhost:8000/scrape/all?companies=myghboard,leverdemo&remote_only=true&skills=python,sql&min_salary=100000"
+```
+
+### Search (no company parameter)
+
+`GET /search` is for **skill-first searching** without passing `companies=...`.
+
+It scrapes across a configured pool of companies:
+
+- Greenhouse pool: env var `GREENHOUSE_COMPANIES` (comma-separated board tokens)
+- Lever pool: env var `LEVER_COMPANIES` (comma-separated site names)
+
+Examples:
+
+```bash
+# Search across configured pools for software engineer roles in USA
+curl -s "http://localhost:8000/search?keyword=software%20engineer&location=usa"
+
+# Search remote data roles requiring Python or SQL
+curl -s "http://localhost:8000/search?remote_only=true&skills=python,sql"
+
+# Only use Lever pool (skip Greenhouse)
+curl -s "http://localhost:8000/search?sources=lever&skills=python,sql"
+```
 
 ## Job model (response)
 

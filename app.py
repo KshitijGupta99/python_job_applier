@@ -170,6 +170,20 @@ async def scrape_lever(
     request: Request,
     client: httpx.AsyncClient = Depends(get_http_client),
     cfg: Settings = Depends(get_settings_dep),
+    keyword: Optional[str] = Query(None),
+    location: Optional[str] = Query(None),
+    remote_only: Optional[bool] = Query(None),
+    employment_type: Optional[str] = Query(
+        None,
+        description="employment type: internship | full-time | part-time | contract",
+    ),
+    min_salary: Optional[int] = Query(None),
+    skills: Optional[str] = Query(
+        None,
+        description="Comma-separated skills (e.g. python,fastapi,aws)",
+    ),
+    posted_within_days: Optional[int] = Query(None),
+    min_match_score: Optional[int] = Query(None),
 ) -> JobsResponse:
     start = perf_counter()
     deduplicator = Deduplicator()
@@ -195,21 +209,38 @@ async def scrape_lever(
             detail=f"Failed to scrape Lever for {company}.",
         )
 
+    skills_list = [s.strip() for s in skills.split(",")] if skills else []
+
+    criteria = FilterCriteria(
+        keyword=keyword,
+        location=location,
+        remote_only=remote_only,
+        employment_type=employment_type,
+        min_salary=min_salary,
+        skills=skills_list,
+        posted_within_days=posted_within_days,
+        min_match_score=min_match_score,
+    )
+
+    filtered_jobs = filter_jobs(jobs, criteria)
+    filters_applied = criteria_to_applied_dict(criteria)
+
     duration_ms = (perf_counter() - start) * 1000
     logger.info(
         {
             "event": "scrape_completed",
             "source": "lever",
             "company": company,
-            "count": len(jobs),
+            "count": len(filtered_jobs),
             "duration_ms": round(duration_ms, 2),
+            "filters_applied": filters_applied,
         }
     )
     return JobsResponse(
-        count=len(jobs),
-        jobs=jobs,
+        count=len(filtered_jobs),
+        jobs=filtered_jobs,
         duration_ms=round(duration_ms, 2),
-        filters_applied={},
+        filters_applied=filters_applied,
     )
 
 
@@ -219,6 +250,20 @@ async def scrape_all(
     request: Request = None,
     client: httpx.AsyncClient = Depends(get_http_client),
     cfg: Settings = Depends(get_settings_dep),
+    keyword: Optional[str] = Query(None),
+    location: Optional[str] = Query(None),
+    remote_only: Optional[bool] = Query(None),
+    employment_type: Optional[str] = Query(
+        None,
+        description="employment type: internship | full-time | part-time | contract",
+    ),
+    min_salary: Optional[int] = Query(None),
+    skills: Optional[str] = Query(
+        None,
+        description="Comma-separated skills (e.g. python,fastapi,aws)",
+    ),
+    posted_within_days: Optional[int] = Query(None),
+    min_match_score: Optional[int] = Query(None),
 ) -> JobsResponse:
     start = perf_counter()
     company_list = [c.strip() for c in companies.split(",") if c.strip()]
@@ -264,21 +309,166 @@ async def scrape_all(
             continue
         jobs.extend(result)
 
+    # Apply filters across combined result set from both sources
+    skills_list = [s.strip() for s in skills.split(",")] if skills else []
+    criteria = FilterCriteria(
+        keyword=keyword,
+        location=location,
+        remote_only=remote_only,
+        employment_type=employment_type,
+        min_salary=min_salary,
+        skills=skills_list,
+        posted_within_days=posted_within_days,
+        min_match_score=min_match_score,
+    )
+    filtered_jobs = filter_jobs(jobs, criteria)
+    filters_applied = criteria_to_applied_dict(criteria)
+
     duration_ms = (perf_counter() - start) * 1000
     logger.info(
         {
             "event": "scrape_completed",
             "source": "all",
             "companies": company_list,
-            "count": len(jobs),
+            "count": len(filtered_jobs),
             "duration_ms": round(duration_ms, 2),
+            "filters_applied": filters_applied,
         }
     )
     return JobsResponse(
-        count=len(jobs),
-        jobs=jobs,
+        count=len(filtered_jobs),
+        jobs=filtered_jobs,
         duration_ms=round(duration_ms, 2),
-        filters_applied={},
+        filters_applied=filters_applied,
+    )
+
+
+def _parse_company_list(raw: str, max_items: int) -> List[str]:
+    items = [c.strip() for c in (raw or "").split(",") if c.strip()]
+    return items[: max(max_items, 0)]
+
+
+@app.get("/search", response_model=JobsResponse)
+async def search(
+    request: Request,
+    client: httpx.AsyncClient = Depends(get_http_client),
+    cfg: Settings = Depends(get_settings_dep),
+    sources: Optional[str] = Query(
+        None,
+        description="Comma-separated sources to search: greenhouse,lever (default: both)",
+    ),
+    keyword: Optional[str] = Query(None),
+    location: Optional[str] = Query(None),
+    remote_only: Optional[bool] = Query(None),
+    employment_type: Optional[str] = Query(
+        None,
+        description="employment type: internship | full-time | part-time | contract",
+    ),
+    min_salary: Optional[int] = Query(None),
+    skills: Optional[str] = Query(
+        None,
+        description="Comma-separated skills (e.g. python,fastapi,aws)",
+    ),
+    posted_within_days: Optional[int] = Query(None),
+    min_match_score: Optional[int] = Query(None),
+) -> JobsResponse:
+    """
+    Skill-based search across a configured pool of companies (no company param required).
+    The company pools come from env vars GREENHOUSE_COMPANIES and LEVER_COMPANIES.
+    """
+    start = perf_counter()
+
+    requested_sources = (
+        {s.strip().lower() for s in sources.split(",") if s.strip()}
+        if sources
+        else {"greenhouse", "lever"}
+    )
+    requested_sources &= {"greenhouse", "lever"}
+
+    greenhouse_companies = (
+        _parse_company_list(cfg.greenhouse_companies, cfg.search_max_companies)
+        if "greenhouse" in requested_sources
+        else []
+    )
+    lever_companies = (
+        _parse_company_list(cfg.lever_companies, cfg.search_max_companies)
+        if "lever" in requested_sources
+        else []
+    )
+
+    if not greenhouse_companies and not lever_companies:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No company pools configured for /search. "
+                "Set GREENHOUSE_COMPANIES and/or LEVER_COMPANIES in .env."
+            ),
+        )
+
+    import asyncio
+
+    deduplicator = Deduplicator()
+    tasks = []
+    for company in greenhouse_companies:
+        tasks.append(
+            greenhouse.scrape_company_jobs(
+                company=company,
+                client=client,
+                settings=cfg,
+                rate_limiter=rate_limiter,
+                deduplicator=deduplicator,
+            )
+        )
+    for company in lever_companies:
+        tasks.append(
+            lever.scrape_company_jobs(
+                company=company,
+                client=client,
+                settings=cfg,
+                rate_limiter=rate_limiter,
+                deduplicator=deduplicator,
+            )
+        )
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    jobs: List[Job] = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error({"event": "search_partial_error", "detail": str(result)})
+            continue
+        jobs.extend(result)
+
+    skills_list = [s.strip() for s in skills.split(",")] if skills else []
+    criteria = FilterCriteria(
+        keyword=keyword,
+        location=location,
+        remote_only=remote_only,
+        employment_type=employment_type,
+        min_salary=min_salary,
+        skills=skills_list,
+        posted_within_days=posted_within_days,
+        min_match_score=min_match_score,
+    )
+    filtered_jobs = filter_jobs(jobs, criteria)
+    filters_applied = criteria_to_applied_dict(criteria)
+
+    duration_ms = (perf_counter() - start) * 1000
+    logger.info(
+        {
+            "event": "search_completed",
+            "sources": sorted(requested_sources),
+            "greenhouse_companies": greenhouse_companies,
+            "lever_companies": lever_companies,
+            "count": len(filtered_jobs),
+            "duration_ms": round(duration_ms, 2),
+            "filters_applied": filters_applied,
+        }
+    )
+    return JobsResponse(
+        count=len(filtered_jobs),
+        jobs=filtered_jobs,
+        duration_ms=round(duration_ms, 2),
+        filters_applied=filters_applied,
     )
 
 

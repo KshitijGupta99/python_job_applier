@@ -13,6 +13,21 @@ class Settings(BaseSettings):
         "INFO", validation_alias="LOG_LEVEL"
     )
     port: int = Field(8000, validation_alias="PORT")
+    greenhouse_companies: str = Field(
+        "",
+        validation_alias="GREENHOUSE_COMPANIES",
+        description="Comma-separated Greenhouse board tokens to search across.",
+    )
+    lever_companies: str = Field(
+        "",
+        validation_alias="LEVER_COMPANIES",
+        description="Comma-separated Lever site names to search across.",
+    )
+    search_max_companies: int = Field(
+        50,
+        validation_alias="SEARCH_MAX_COMPANIES",
+        description="Safety cap on how many companies are scraped in /search.",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
