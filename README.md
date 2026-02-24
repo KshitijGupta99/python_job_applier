@@ -82,7 +82,23 @@ curl -s "http://localhost:8000/scrape/greenhouse/vaulttec"
 curl -s "http://localhost:8000/scrape/greenhouse/embed"
 ```
 
-Example response: `{"count": N, "jobs": [...], "duration_ms": 123.45}`
+Example response: `{"count": N, "jobs": [...], "duration_ms": 123.45, "filters_applied": {}}`
+
+#### Greenhouse with filters
+
+```bash
+# Software engineer roles in USA
+curl -s "http://localhost:8000/scrape/greenhouse/mycompany?keyword=software%20engineer&location=usa"
+
+# Remote-only internships mentioning 'data'
+curl -s "http://localhost:8000/scrape/greenhouse/mycompany?keyword=data&remote_only=true&employment_type=internship"
+
+# Jobs with at least one of the listed skills, posted in last 7 days
+curl -s "http://localhost:8000/scrape/greenhouse/mycompany?skills=python,fastapi,aws&posted_within_days=7"
+
+# Salary filter + minimum skill overlap score
+curl -s "http://localhost:8000/scrape/greenhouse/mycompany?min_salary=120000&skills=python,aws&min_match_score=2"
+```
 
 ### Scrape Lever (single company)
 

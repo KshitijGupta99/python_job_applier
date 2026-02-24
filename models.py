@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List
+from typing import Any, Dict, List
 
 from pydantic import BaseModel, HttpUrl, Field
 
@@ -20,6 +20,7 @@ class JobsResponse(BaseModel):
     count: int
     jobs: List[Job]
     duration_ms: float
+    filters_applied: Dict[str, Any] = Field(default_factory=dict)
 
 
 def utcnow() -> datetime:

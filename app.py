@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from time import perf_counter
-from typing import List
+from typing import List, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -13,6 +13,11 @@ from sources import greenhouse, lever
 from utils.deduplicator import Deduplicator
 from utils.logger import get_logger, setup_logging
 from utils.rate_limiter import RateLimiter
+from utils.filter_engine import (
+    FilterCriteria,
+    filter_jobs,
+    criteria_to_applied_dict,
+)
 
 
 load_dotenv()
@@ -84,6 +89,20 @@ async def scrape_greenhouse(
     request: Request,
     client: httpx.AsyncClient = Depends(get_http_client),
     cfg: Settings = Depends(get_settings_dep),
+    keyword: Optional[str] = Query(None),
+    location: Optional[str] = Query(None),
+    remote_only: Optional[bool] = Query(None),
+    employment_type: Optional[str] = Query(
+        None,
+        description="employment type: internship | full-time | part-time | contract",
+    ),
+    min_salary: Optional[int] = Query(None),
+    skills: Optional[str] = Query(
+        None,
+        description="Comma-separated skills (e.g. python,fastapi,aws)",
+    ),
+    posted_within_days: Optional[int] = Query(None),
+    min_match_score: Optional[int] = Query(None),
 ) -> JobsResponse:
     start = perf_counter()
     deduplicator = Deduplicator()
@@ -109,17 +128,40 @@ async def scrape_greenhouse(
             detail=f"Failed to scrape Greenhouse for {company}.",
         )
 
+    # Build criteria from query params and filter in-memory
+    skills_list = [s.strip() for s in skills.split(",")] if skills else []
+
+    criteria = FilterCriteria(
+        keyword=keyword,
+        location=location,
+        remote_only=remote_only,
+        employment_type=employment_type,
+        min_salary=min_salary,
+        skills=skills_list,
+        posted_within_days=posted_within_days,
+        min_match_score=min_match_score,
+    )
+
+    filtered_jobs = filter_jobs(jobs, criteria)
+    filters_applied = criteria_to_applied_dict(criteria)
+
     duration_ms = (perf_counter() - start) * 1000
     logger.info(
         {
             "event": "scrape_completed",
             "source": "greenhouse",
             "company": company,
-            "count": len(jobs),
+            "count": len(filtered_jobs),
             "duration_ms": round(duration_ms, 2),
+            "filters_applied": filters_applied,
         }
     )
-    return JobsResponse(count=len(jobs), jobs=jobs, duration_ms=round(duration_ms, 2))
+    return JobsResponse(
+        count=len(filtered_jobs),
+        jobs=filtered_jobs,
+        duration_ms=round(duration_ms, 2),
+        filters_applied=filters_applied,
+    )
 
 
 @app.get("/scrape/lever/{company}", response_model=JobsResponse)
@@ -163,7 +205,12 @@ async def scrape_lever(
             "duration_ms": round(duration_ms, 2),
         }
     )
-    return JobsResponse(count=len(jobs), jobs=jobs, duration_ms=round(duration_ms, 2))
+    return JobsResponse(
+        count=len(jobs),
+        jobs=jobs,
+        duration_ms=round(duration_ms, 2),
+        filters_applied={},
+    )
 
 
 @app.get("/scrape/all", response_model=JobsResponse)
@@ -227,7 +274,12 @@ async def scrape_all(
             "duration_ms": round(duration_ms, 2),
         }
     )
-    return JobsResponse(count=len(jobs), jobs=jobs, duration_ms=round(duration_ms, 2))
+    return JobsResponse(
+        count=len(jobs),
+        jobs=jobs,
+        duration_ms=round(duration_ms, 2),
+        filters_applied={},
+    )
 
 
 if __name__ == "__main__":

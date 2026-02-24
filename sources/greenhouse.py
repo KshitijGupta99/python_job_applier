@@ -54,7 +54,7 @@ async def scrape_company_jobs(
             continue
         job_id = deduplicator.is_new(apply_url)
         if job_id is None:
-            continue
+            continue 
         job = normalize_greenhouse_job(raw, company, job_id)
         jobs.append(job)
     return jobs
